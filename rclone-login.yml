@@ -1,0 +1,16 @@
+- hosts: all
+  become: true
+  tasks:
+    - name: Ensure config directory exists
+      file:
+        path: "/root/.config/rclone"
+        state: directory
+        recurse: yes
+
+    - name: Copy rclone config
+      copy:
+        src: ~/.config/rclone/rclone.conf
+        dest: /root/.config/rclone/rclone.conf
+        owner: root
+        group: root
+        mode: '0600'

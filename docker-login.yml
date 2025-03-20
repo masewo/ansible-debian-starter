@@ -1,0 +1,19 @@
+- hosts: all
+  become: true
+  gather_facts: false
+  vars_prompt:
+    - name: docker_username
+      prompt: Enter the DockerHub username
+    - name: docker_password
+      prompt: Enter the DockerHub password
+  tasks:
+    - name: Ensure Python libraries are installed
+      ansible.builtin.pip:
+        name:
+          - requests
+        break_system_packages: true
+
+    - name: Log into DockerHub
+      docker_login:
+        username: "{{ docker_username }}"
+        password: "{{ docker_password }}"

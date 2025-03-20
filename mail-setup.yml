@@ -1,0 +1,26 @@
+- hosts: all
+  become: true
+  vars_prompt:
+    - name: mail_host
+      prompt: Enter the Mail host
+    - name: mail_username
+      prompt: Enter the Mail username
+    - name: mail_password
+      prompt: Enter the Mail password
+  roles:
+    - role: chriswayg.msmtp-mailer
+      vars:
+        msmtp_accounts:
+          - account: default
+            host: "{{ mail_host }}"
+            port: 587
+            tls_starttls: "on"
+            auth: "on"
+            from: "{{ mail_username }}"
+            user: "{{ mail_username }}"
+            password: "{{ mail_password }}"
+        msmtp_default_account: "default"
+        msmtp_log: "file"
+        msmtp_logfile: ~/.msmtp.log
+        msmtp_alias_default: "{{ mail_username }}"
+        msmtp_domain: "{{ mail_host }}"

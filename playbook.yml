@@ -1,0 +1,279 @@
+- name: Server setup
+  hosts: all
+  become: true
+  vars:
+    ssh_port: '22222'
+    sudo_timeout: 20
+
+  tasks:
+    - name: Update apt package cache
+      apt:
+        update_cache: 'yes'
+        cache_valid_time: 600
+
+    - name: Upgrade installed apt packages
+      apt:
+        upgrade: dist
+      register: upgrade
+
+    - name: Ensure that a base set of software packages are installed
+      apt:
+        pkg:
+          - btop
+          - curl
+          - fail2ban
+          - git
+          - jq
+          - needrestart
+          - net-tools
+          - postgresql-client-15
+          - pwgen
+          - python3-pip
+          - resolvconf
+          - rsync
+          - rclone
+          - rsyslog
+          - sqlite3
+          - sudo
+          - ufw
+          - unbound
+        state: latest
+
+    - name: Install required system packages for Docker
+      apt:
+        pkg:
+          - ca-certificates
+          - gnupg
+        state: latest
+
+    - name: Add Docker's official GPG key
+      shell: |
+        mkdir -m 0755 -p /etc/apt/keyrings
+        curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor --batch --yes -o /etc/apt/keyrings/docker.gpg
+
+    - name: Use the following command to set up the Docker repository
+      shell: |
+        echo \
+        "deb [arch="$(dpkg --print-architecture)" signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
+        "$(. /etc/os-release && echo "$VERSION_CODENAME")" stable" | \
+        sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+
+    - name: Update apt package cache
+      apt:
+        update_cache: 'yes'
+        cache_valid_time: 600
+
+    - name: Install Docker
+      apt:
+        pkg:
+          - docker-ce
+          - docker-ce-cli
+          - containerd.io
+          - docker-buildx-plugin
+          - docker-compose-plugin
+        state: latest
+        update_cache: 'yes'
+
+    - name: Enable Docker after reboot and start it
+      shell: |
+        systemctl enable docker
+        systemctl start docker
+
+    - name: Check if a reboot is needed for Debian-based systems
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Make users passwordless for sudo
+      lineinfile:
+        path: /etc/sudoers
+        state: present
+        regexp: '^%sudo'
+        line: '%sudo ALL=(ALL) NOPASSWD: ALL'
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Set sudo password timeout
+      lineinfile:
+        path: /etc/sudoers
+        regexp: ^Defaults\s+env_reset
+        line: 'Defaults        env_reset, timestamp_timeout={{ sudo_timeout }}'
+        validate: /usr/sbin/visudo -cf %s
+
+    - name: Create users with sudo privileges
+      user:
+        name: '{{ item }}'
+        password: "{{ lookup('ansible.builtin.password', '/dev/null', seed=inventory_hostname) | password_hash('sha512') }}"
+        groups: "sudo, users"
+        append: true
+        shell: /bin/bash
+      with_items:
+        - username
+
+    - name: Ensure authorized keys for remote user is installed
+      authorized_key:
+        user: '{{ item }}'
+        key: "{{ lookup('file', 'id_rsa_{{item}}.pub') }}"
+      with_items:
+        - username
+
+    - name: Disable root login via SSH
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PermitRootLogin'
+        line: PermitRootLogin no
+      notify:
+        - restart sshd
+
+    - name: Disable tunneled clear-text passwords
+      lineinfile:
+        path: /etc/ssh/sshd_config
+        regexp: '^#?PasswordAuthentication'
+        line: PasswordAuthentication no
+      notify:
+        - restart sshd
+
+    - name: Set ssh port number
+      lineinfile:
+        dest: /etc/ssh/sshd_config
+        regexp: 'Port '
+        line: 'Port {{ ssh_port }}'
+        state: present
+      notify:
+        - restart sshd
+
+    - name: Harden TCP/IP stack against SYN floods
+      sysctl: name="net.ipv4.tcp_syncookies" value=1 sysctl_set=yes state=present reload=yes
+
+    - name: Deny all incoming
+      ufw:
+        direction: incoming
+        policy: deny
+      notify:
+        - restart ufw
+
+    - name: Allow all outgoing
+      ufw:
+        direction: outgoing
+        policy: allow
+      notify:
+        - restart ufw
+
+    - name: Allow SSH
+      ufw:
+        rule: allow
+        port: "{{ ssh_port }}"
+        proto: tcp
+      notify:
+        - restart ufw
+
+    - name: UFW - Allow HTTP and HTTPS
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      with_items:
+        - "80"
+        - "443"
+      notify:
+        - restart ufw
+
+    - name: Enable ufw logging
+      ufw:
+        logging: on
+      notify:
+        - restart ufw
+
+    - name: Enable ufw service
+      ufw:
+        state: enabled
+
+    - name: Start fail2ban service
+      service:
+        name: fail2ban
+        state: started
+
+    - name: Enable fail2ban service
+      service:
+        name: fail2ban
+        enabled: true
+
+    - name: Copy fail2ban default config
+      template: src=fail2ban.conf.j2 dest=/etc/fail2ban/jail.local
+      notify:
+        - restart fail2ban
+
+    - import_tasks: ipset-blacklist.yml
+      vars:
+        download_script_url: https://raw.githubusercontent.com/trick77/ipset-blacklist/master/update-blacklist.sh
+        ipsets_confdir: /etc/ipset-blacklist
+        ipsets_blacklist_name: blacklist
+        ip_blacklist_restore: ip-blacklist.restore
+        ip_blacklist: ip-blacklist.list
+        verbose: "yes"
+        force: "yes"
+        blacklists:
+          - https://www.dshield.org/block.txt
+          - https://www.projecthoneypot.org/list_of_ips.php?t=d&rss=1 # Project Honey Pot Directory of Dictionary Attacker IPs
+          - https://check.torproject.org/cgi-bin/TorBulkExitList.py?ip=1.1.1.1  # TOR Exit Nodes
+          - https://danger.rulez.sk/projects/bruteforceblocker/blist.php # BruteForceBlocker IP List
+          - https://www.spamhaus.org/drop/drop.lasso # Spamhaus Don't Route Or Peer List (DROP)
+          - https://cinsscore.com/list/ci-badguys.txt # C.I. Army Malicious IP List
+          - https://lists.blocklist.de/lists/all.txt # blocklist.de attackers
+          - https://blocklist.greensnow.co/greensnow.txt # GreenSnow
+          - https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/firehol_level1.netset # Firehol Level 1
+          - https://raw.githubusercontent.com/firehol/blocklist-ipsets/master/stopforumspam_7d.ipset # Stopforumspam via Firehol
+          - https://raw.githubusercontent.com/stamparm/ipsum/master/levels/1.txt
+        maxelements: 1000000
+
+    - name: Check if any services needs to be restarted
+      command: needrestart -r a
+      when: upgrade.changed and reboot_required.stat.exists == false
+
+    - name: Reboot the server if needed
+      reboot:
+        msg: Reboot initiated by Ansible because of reboot required file.
+        connect_timeout: 5
+        reboot_timeout: 600
+        pre_reboot_delay: 0
+        post_reboot_delay: 30
+        test_command: whoami
+      when: reboot_required.stat.exists
+
+    - name: Remove old packages from the cache
+      apt:
+        autoclean: 'yes'
+
+    - name: Remove dependencies that are no longer needed
+      apt:
+        autoremove: 'yes'
+        purge: 'yes'
+
+  handlers:
+    - name: restart cron
+      service:
+        name: cron
+        state: restarted
+      when: reboot_required.stat.exists == false
+
+    - name: restart fail2ban
+      service:
+        name: fail2ban
+        state: restarted
+      when: reboot_required.stat.exists == false
+
+    - name: restart sshd
+      service:
+        name: sshd
+        state: restarted
+      when: reboot_required.stat.exists == false
+
+    - name: restart networking
+      service:
+        name: networking
+        state: restarted
+      when: reboot_required.stat.exists == false
+
+    - name: restart ufw
+      service:
+        name: ufw
+        state: restarted
